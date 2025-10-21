@@ -376,7 +376,10 @@
         // キーボードイベント
         document.addEventListener('keydown', (e) => {
             if (e.key === 'r' || e.key === 'R') {
-                initGame();
+                // 入力フィールドにフォーカスがない場合のみリセット
+                if (document.activeElement !== inputField) {
+                    initGame();
+                }
             }
         });
 
