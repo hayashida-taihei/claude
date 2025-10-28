@@ -3,8 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PDFテキスト抽出アプリ</title>
+    <title>PDFテキスト抽出アプリ（OCR対応）</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.0.4/dist/tesseract.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -46,6 +47,15 @@
         .header p {
             font-size: 1.1em;
             opacity: 0.9;
+        }
+
+        .header .ocr-badge {
+            display: inline-block;
+            background: rgba(255, 255, 255, 0.2);
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            margin-top: 10px;
         }
 
         .content {
@@ -136,6 +146,40 @@
             margin-bottom: 10px;
         }
 
+        .ocr-mode {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f8f9ff;
+            border-radius: 10px;
+            display: none;
+        }
+
+        .ocr-mode.show {
+            display: block;
+        }
+
+        .ocr-mode label {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            cursor: pointer;
+            color: #333;
+            font-size: 1em;
+        }
+
+        .ocr-mode input[type="checkbox"] {
+            width: 20px;
+            height: 20px;
+            cursor: pointer;
+        }
+
+        .ocr-info {
+            margin-top: 10px;
+            font-size: 0.9em;
+            color: #666;
+            padding-left: 30px;
+        }
+
         .loading {
             display: none;
             margin-top: 20px;
@@ -159,6 +203,30 @@
         @keyframes spin {
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
+        }
+
+        .progress-info {
+            color: #667eea;
+            font-size: 0.95em;
+            margin-top: 10px;
+            font-weight: 500;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: #e0e7ff;
+            border-radius: 10px;
+            margin-top: 10px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            width: 0%;
+            transition: width 0.3s ease;
+            border-radius: 10px;
         }
 
         .result-section {
@@ -269,6 +337,7 @@
         <div class="header">
             <h1>📄 PDFテキスト抽出</h1>
             <p>PDFファイルをアップロードして、テキストを簡単に抽出できます</p>
+            <div class="ocr-badge">🔍 日本語OCR対応</div>
         </div>
 
         <div class="content">
@@ -290,9 +359,24 @@
                 </button>
             </div>
 
+            <div class="ocr-mode" id="ocrMode">
+                <label>
+                    <input type="checkbox" id="useOCR" checked>
+                    <span>🔍 OCRモード（画像化された文字も読み取り）</span>
+                </label>
+                <div class="ocr-info">
+                    スキャンしたPDFや画像化された日本語の文字も認識できます。
+                    処理時間は通常より長くなります。
+                </div>
+            </div>
+
             <div class="loading" id="loading">
                 <div class="spinner"></div>
-                <p>PDFを処理中...</p>
+                <p id="loadingText">PDFを処理中...</p>
+                <div class="progress-info" id="progressInfo"></div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill"></div>
+                </div>
             </div>
 
             <div class="result-section" id="resultSection">
@@ -371,9 +455,11 @@
             selectedFile = file;
             const fileInfo = document.getElementById('fileInfo');
             const fileName = document.getElementById('fileName');
+            const ocrMode = document.getElementById('ocrMode');
 
             fileName.textContent = `${file.name} (${formatFileSize(file.size)})`;
             fileInfo.classList.add('show');
+            ocrMode.classList.add('show');
 
             // 結果セクションを非表示
             document.getElementById('resultSection').classList.remove('show');
@@ -388,28 +474,104 @@
             return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
         }
 
-        // テキスト抽出処理
+        // 進行状況の更新
+        function updateProgress(current, total, message) {
+            const progressInfo = document.getElementById('progressInfo');
+            const progressFill = document.getElementById('progressFill');
+            const percentage = Math.round((current / total) * 100);
+
+            progressInfo.textContent = `${message} (${current}/${total}ページ) - ${percentage}%`;
+            progressFill.style.width = `${percentage}%`;
+        }
+
+        // テキスト抽出処理（通常モード）
+        async function extractTextNormal(pdf) {
+            let fullText = '';
+            const numPages = pdf.numPages;
+
+            for (let i = 1; i <= numPages; i++) {
+                updateProgress(i, numPages, '通常テキストを抽出中');
+                const page = await pdf.getPage(i);
+                const textContent = await page.getTextContent();
+                const pageText = textContent.items.map(item => item.str).join(' ');
+                fullText += pageText + '\n\n';
+            }
+
+            return fullText;
+        }
+
+        // OCRによるテキスト抽出
+        async function extractTextWithOCR(pdf) {
+            let fullText = '';
+            const numPages = pdf.numPages;
+
+            // Tesseractの初期化
+            document.getElementById('loadingText').textContent = '日本語OCRを初期化中...';
+            const worker = await Tesseract.createWorker('jpn', 1, {
+                logger: m => {
+                    if (m.status === 'loading tesseract core' || m.status === 'loading language traineddata') {
+                        console.log(`${m.status}: ${Math.round(m.progress * 100)}%`);
+                    }
+                }
+            });
+
+            try {
+                for (let i = 1; i <= numPages; i++) {
+                    updateProgress(i, numPages, 'OCRでテキストを認識中');
+                    document.getElementById('loadingText').textContent = `ページ ${i}/${numPages} を処理中...`;
+
+                    // PDFページを画像に変換
+                    const page = await pdf.getPage(i);
+                    const viewport = page.getViewport({ scale: 2.0 }); // 高解像度で取得
+                    const canvas = document.createElement('canvas');
+                    const context = canvas.getContext('2d');
+                    canvas.width = viewport.width;
+                    canvas.height = viewport.height;
+
+                    await page.render({
+                        canvasContext: context,
+                        viewport: viewport
+                    }).promise;
+
+                    // OCR実行
+                    const { data: { text } } = await worker.recognize(canvas);
+                    fullText += text + '\n\n';
+                }
+            } finally {
+                await worker.terminate();
+            }
+
+            return fullText;
+        }
+
+        // テキスト抽出処理（メイン）
         async function extractText() {
             if (!selectedFile) return;
+
+            const useOCR = document.getElementById('useOCR').checked;
 
             // UI更新
             document.getElementById('loading').classList.add('show');
             document.getElementById('extractBtn').disabled = true;
             document.getElementById('resultSection').classList.remove('show');
+            document.getElementById('progressInfo').textContent = '';
+            document.getElementById('progressFill').style.width = '0%';
 
             try {
                 const arrayBuffer = await selectedFile.arrayBuffer();
                 const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-
-                let fullText = '';
                 const numPages = pdf.numPages;
 
-                // 各ページからテキストを抽出
-                for (let i = 1; i <= numPages; i++) {
-                    const page = await pdf.getPage(i);
-                    const textContent = await page.getTextContent();
-                    const pageText = textContent.items.map(item => item.str).join(' ');
-                    fullText += pageText + '\n\n';
+                let fullText = '';
+
+                if (useOCR) {
+                    // OCRモード
+                    document.getElementById('loadingText').textContent = 'OCRモードで処理中...';
+                    fullText = await extractTextWithOCR(pdf);
+                } else {
+                    // 通常モード
+                    document.getElementById('loadingText').textContent = '通常モードで処理中...';
+                    fullText = await extractTextNormal(pdf);
                 }
 
                 // 結果を表示
@@ -421,6 +583,7 @@
             } finally {
                 document.getElementById('loading').classList.remove('show');
                 document.getElementById('extractBtn').disabled = false;
+                document.getElementById('loadingText').textContent = 'PDFを処理中...';
             }
         }
 
